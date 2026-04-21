@@ -269,6 +269,13 @@
       bg: 0x0a0a0a,
       wall: 0x333333
     };
+    // Shared geometry & materials (pooled) - prevents memory leaks and GC stutter
+    const SEG_GEO = new THREE.BoxGeometry(0.9, 0.9, 0.9);
+    const MAT_HEAD = new THREE.MeshLambertMaterial({ color: COLORS.head });
+    const MAT_BODY_A = new THREE.MeshLambertMaterial({ color: COLORS.bodyA });
+    const MAT_BODY_B = new THREE.MeshLambertMaterial({ color: COLORS.bodyB });
+    const MAT_WALL = new THREE.MeshLambertMaterial({ color: COLORS.wall });
+
 
     // ==================== GAME STATE ====================
     let scene, camera, renderer;
@@ -301,7 +308,7 @@
       // Create scene with dark background and fog
       scene = new THREE.Scene();
       scene.background = new THREE.Color(COLORS.bg);
-      scene.fog = new THREE.Fog(COLORS.bg, 25, 45);
+      // Fog disabled for performance
 
       // Perspective camera looking down at board
       camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
@@ -309,9 +316,9 @@
       camera.lookAt(0, 0, 0);
 
       // WebGL renderer with antialias and shadows
-      renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
       renderer.setSize(window.innerWidth, window.innerHeight);
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setPixelRatio(1);
       renderer.shadowMap.enabled = true;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -323,8 +330,8 @@
       const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
       dirLight.position.set(10, 20, 10);
       dirLight.castShadow = true;
-      dirLight.shadow.mapSize.width = 2048;
-      dirLight.shadow.mapSize.height = 2048;
+      dirLight.shadow.mapSize.width = 512;
+      dirLight.shadow.mapSize.height = 512;
       dirLight.shadow.camera.near = 0.5;
       dirLight.shadow.camera.far = 50;
       dirLight.shadow.camera.left = -15;
@@ -357,7 +364,7 @@
     function createBoard() {
       // Dark floor plane
       const floorGeo = new THREE.PlaneGeometry(GRID_SIZE * CELL_SIZE, GRID_SIZE * CELL_SIZE);
-      const floorMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.8 });
+      const floorMat = new THREE.MeshLambertMaterial({ color: 0x111111 });
       const floor = new THREE.Mesh(floorGeo, floorMat);
       floor.rotation.x = -Math.PI / 2;
       floor.position.y = -0.5;
@@ -374,10 +381,9 @@
       const wallThick = 0.2;
       const half = GRID_SIZE * CELL_SIZE / 2;
       const wallGeo = new THREE.BoxGeometry(1, 1, 1);
-      const wallMat = new THREE.MeshStandardMaterial({ color: COLORS.wall });
 
       function addWall(sx, sy, sz, dx, dy, dz) {
-        const wall = new THREE.Mesh(wallGeo, wallMat);
+        const wall = new THREE.Mesh(wallGeo, MAT_WALL);
         wall.scale.set(sx, sy, sz);
         wall.position.set(dx, dy, dz);
         wall.castShadow = true;
@@ -402,27 +408,22 @@
       snakeSegments.forEach(s => scene.remove(s.mesh));
       snakeSegments = [];
 
-      // Starting positions: head at (0,0), body trailing left
       const startPositions = [
         { x: 0, z: 0 },
         { x: -1, z: 0 },
         { x: -2, z: 0 }
       ];
-      const geo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
 
       for (let i = 0; i < startPositions.length; i++) {
-        const color = i === 0 ? COLORS.head : (i % 2 === 1 ? COLORS.bodyA : COLORS.bodyB);
-        const mat = new THREE.MeshStandardMaterial({ color });
-        const mesh = new THREE.Mesh(geo, mat);
+        const mat = i === 0 ? MAT_HEAD : (i % 2 === 1 ? MAT_BODY_A : MAT_BODY_B);
+        const mesh = new THREE.Mesh(SEG_GEO, mat);
         const pos = startPositions[i];
         mesh.position.set(pos.x * CELL_SIZE, 0, pos.z * CELL_SIZE);
         mesh.castShadow = true;
-        mesh.receiveShadow = true;
         scene.add(mesh);
         snakeSegments.push({ mesh, x: pos.x, z: pos.z });
       }
 
-      // Make head slightly larger
       if (snakeSegments.length > 0) {
         snakeSegments[0].mesh.scale.set(1.05, 1.05, 1.05);
       }
@@ -435,7 +436,7 @@
 
       // Glowing orange sphere
       const geo = new THREE.SphereGeometry(0.4, 24, 24);
-      const mat = new THREE.MeshStandardMaterial({
+      const mat = new THREE.MeshLambertMaterial({
         color: COLORS.food,
         emissive: COLORS.foodEmissive,
         emissiveIntensity: 0.6
@@ -487,7 +488,7 @@
       ];
       const geo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
 
-      for (let i = 0; i < 12; i++) {
+      for (let i = 0; i < 6; i++) {
         const mat = new THREE.MeshBasicMaterial({
           color: colors[Math.floor(Math.random() * colors.length)]
         });
@@ -666,10 +667,8 @@
         scene.remove(tail.mesh);
       }
 
-      // Create new head segment
-      const geo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
-      const mat = new THREE.MeshStandardMaterial({ color: COLORS.head });
-      const newHead = new THREE.Mesh(geo, mat);
+      // Create new head segment (reuse shared geo/mat)
+      const newHead = new THREE.Mesh(SEG_GEO, MAT_HEAD);
       newHead.position.set(newX * CELL_SIZE, 0, newZ * CELL_SIZE);
       newHead.castShadow = true;
       newHead.receiveShadow = true;
@@ -679,8 +678,7 @@
 
       // Recolor body segments (alternating pattern)
       for (let i = 1; i < snakeSegments.length; i++) {
-        const color = i % 2 === 1 ? COLORS.bodyA : COLORS.bodyB;
-        snakeSegments[i].mesh.material.color.setHex(color);
+        snakeSegments[i].mesh.material = (i % 2 === 1 ? MAT_BODY_A : MAT_BODY_B);
         snakeSegments[i].mesh.scale.set(1, 1, 1);
       }
     }
@@ -695,9 +693,9 @@
       const targetZ = head.mesh.position.z * 0.3 + 18;
       const targetY = 18;
 
-      camera.position.x += (targetX - camera.position.x) * 2.5 * dt;
-      camera.position.y += (targetY - camera.position.y) * 2.5 * dt;
-      camera.position.z += (targetZ - camera.position.z) * 2.5 * dt;
+      camera.position.x += (targetX - camera.position.x) * 1.5 * dt;
+      camera.position.y += (targetY - camera.position.y) * 1.5 * dt;
+      camera.position.z += (targetZ - camera.position.z) * 1.5 * dt;
 
       // Look slightly ahead of the head
       camera.lookAt(head.mesh.position.x * 0.2, 0, head.mesh.position.z * 0.2);
