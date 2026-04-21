@@ -50,6 +50,24 @@
       text-shadow: 0 1px 2px rgba(0,0,0,0.8);
       margin-top: 2px;
     }
+    #hud .level {
+      font-size: 0.9rem;
+      color: #FF9800;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+      margin-top: 2px;
+    }
+    #hud .combo {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #FFEB3B;
+      text-shadow: 0 0 10px rgba(255,235,59,0.6);
+      margin-top: 2px;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    #hud .combo.active {
+      opacity: 1;
+    }
 
     /* === OVERLAYS === */
     .overlay {
@@ -66,6 +84,8 @@
     .overlay.hidden {
       opacity: 0;
       pointer-events: none;
+      visibility: hidden;
+      transition: opacity 0.3s, visibility 0s 0.3s;
     }
     .overlay h1 {
       font-size: 3rem;
@@ -155,9 +175,16 @@
     .btn:hover {
       background: #43A047;
     }
-    .btn:active {
-      transform: translateY(4px);
-      box-shadow: 0 0 0 #2E7D32;
+    .btn-secondary {
+      background: #FF9800;
+      box-shadow: 0 4px 0 #E65100;
+      margin-top: 8px;
+    }
+    .btn-secondary:hover {
+      background: #F57C00;
+    }
+    .btn-secondary:active {
+      box-shadow: 0 0 0 #E65100;
     }
 
     /* === D-PAD (mobile) === */
@@ -218,6 +245,8 @@
   <div id="hud">
     <div class="score">Score: <span id="score">0</span></div>
     <div class="best">Best: <span id="best">0</span></div>
+    <div class="level">Level <span id="level">1</span></div>
+    <div class="combo" id="combo-display">COMBO x<span id="combo-count">0</span>!</div>
   </div>
 
   <!-- Title screen overlay -->
@@ -234,6 +263,8 @@
     </div>
     <p class="hint">Avoid the walls and your own tail!</p>
     <button class="btn" id="start-btn">Start Game</button>
+    <button class="btn btn-secondary" id="toggle-wrap-btn">Wall Wrap: OFF</button>
+    <p class="hint" style="margin-top:4px">Golden food = 50 pts! Speed increases every level!</p>
   </div>
 
   <!-- Game over overlay -->
@@ -241,7 +272,9 @@
     <h2>GAME OVER</h2>
     <p>Final Score: <span id="final-score">0</span></p>
     <p>Best Score: <span id="final-best">0</span></p>
+    <p id="level-reached">Level Reached: 1</p>
     <button class="btn" id="restart-btn">Play Again</button>
+    <button class="btn btn-secondary" id="toggle-wrap-gameover">Wall Wrap: OFF</button>
   </div>
 
   <!-- Mobile D-pad -->
@@ -259,7 +292,58 @@
     // ==================== CONFIGURATION ====================
     const GRID_SIZE = 20;
     const CELL_SIZE = 1;
-    const MOVE_INTERVAL = 150; // ms between snake moves
+    const MOVE_INTERVAL_BASE = 150;
+    let moveInterval = MOVE_INTERVAL_BASE;
+    let comboCount = 0;
+    let lastEatTime = 0;
+    let screenShake = 0;
+    let trailParticles = [];
+    let wallWrapMode = false;
+    let goldenFoodActive = false;
+    let goldenFoodMesh, goldenFoodLight;
+    let level = 1;
+    let foodsEaten = 0;
+    let gameTime = 0;
+    let soundEnabled = true;
+    let audioCtx = null;
+    let bgmOsc = null;
+
+    function initAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+    }
+
+    function playTone(freq, duration, type = 'square', volume = 0.1) {
+      if (!soundEnabled || !audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type;
+      osc.frequency.value = freq;
+      gain.gain.value = volume;
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + duration);
+    }
+
+    function playEatSound(combo) {
+      const baseFreq = 440 + combo * 50;
+      playTone(baseFreq, 0.1, 'sine', 0.15);
+      setTimeout(() => playTone(baseFreq * 1.5, 0.1, 'sine', 0.1), 50);
+    }
+
+    function playCrashSound() {
+      playTone(100, 0.3, 'sawtooth', 0.2);
+      playTone(80, 0.4, 'sawtooth', 0.15);
+    }
+
+    function playGoldenSound() {
+      [523, 659, 784, 1047].forEach((f, i) => {
+        setTimeout(() => playTone(f, 0.15, 'sine', 0.2), i * 80);
+      });
+    }
     const COLORS = {
       head: 0x4CAF50,
       bodyA: 0x388E3C,
@@ -271,10 +355,10 @@
     };
     // Shared geometry & materials (pooled) - prevents memory leaks and GC stutter
     const SEG_GEO = new THREE.BoxGeometry(0.9, 0.9, 0.9);
-    const MAT_HEAD = new THREE.MeshLambertMaterial({ color: COLORS.head });
-    const MAT_BODY_A = new THREE.MeshLambertMaterial({ color: COLORS.bodyA });
-    const MAT_BODY_B = new THREE.MeshLambertMaterial({ color: COLORS.bodyB });
-    const MAT_WALL = new THREE.MeshLambertMaterial({ color: COLORS.wall });
+    const MAT_HEAD = new THREE.MeshStandardMaterial({ color: COLORS.head, emissive: 0x2E7D32, emissiveIntensity: 0.3, roughness: 0.3, metalness: 0.2 });
+    const MAT_BODY_A = new THREE.MeshStandardMaterial({ color: COLORS.bodyA, emissive: 0x1B5E20, emissiveIntensity: 0.15, roughness: 0.4, metalness: 0.1 });
+    const MAT_BODY_B = new THREE.MeshStandardMaterial({ color: COLORS.bodyB, emissive: 0x1B5E20, emissiveIntensity: 0.1, roughness: 0.4, metalness: 0.1 });
+    const MAT_WALL = new THREE.MeshStandardMaterial({ color: COLORS.wall, emissive: 0x222222, emissiveIntensity: 0.1, roughness: 0.8 });
 
 
     // ==================== GAME STATE ====================
@@ -352,6 +436,27 @@
       // UI button listeners
       document.getElementById('start-btn').addEventListener('click', startGame);
       document.getElementById('restart-btn').addEventListener('click', resetGame);
+
+      // Wall wrap toggle on title screen
+      const wrapBtn = document.getElementById('toggle-wrap-btn');
+      if (wrapBtn) {
+        wrapBtn.addEventListener('click', () => {
+          wallWrapMode = !wallWrapMode;
+          wrapBtn.textContent = 'Wall Wrap: ' + (wallWrapMode ? 'ON' : 'OFF');
+          const gameoverWrapBtn = document.getElementById('toggle-wrap-gameover');
+          if (gameoverWrapBtn) gameoverWrapBtn.textContent = 'Wall Wrap: ' + (wallWrapMode ? 'ON' : 'OFF');
+        });
+      }
+
+      // Wall wrap toggle on game over
+      const gameoverWrapBtn = document.getElementById('toggle-wrap-gameover');
+      if (gameoverWrapBtn) {
+        gameoverWrapBtn.addEventListener('click', () => {
+          wallWrapMode = !wallWrapMode;
+          gameoverWrapBtn.textContent = 'Wall Wrap: ' + (wallWrapMode ? 'ON' : 'OFF');
+          if (wrapBtn) wrapBtn.textContent = 'Wall Wrap: ' + (wallWrapMode ? 'ON' : 'OFF');
+        });
+      }
 
       // Setup touch controls
       setupDpad();
@@ -478,17 +583,13 @@
     }
 
     // ==================== PARTICLE EFFECTS ====================
-    function spawnParticles(x, z) {
+    function spawnParticles(x, z, count = 6) {
       const colors = [
-        0xFF9800,  // Orange
-        0xFF5722,  // Deep orange
-        0xFFEB3B,  // Yellow
-        0x4CAF50,  // Green
-        0x00E5FF   // Cyan
+        0xFF9800, 0xFF5722, 0xFFEB3B, 0x4CAF50, 0x00E5FF
       ];
       const geo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
 
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < count; i++) {
         const mat = new THREE.MeshBasicMaterial({
           color: colors[Math.floor(Math.random() * colors.length)]
         });
@@ -498,11 +599,11 @@
 
         particles.push({
           mesh,
-          vx: (Math.random() - 0.5) * 0.15,
-          vy: Math.random() * 0.12 + 0.04,
-          vz: (Math.random() - 0.5) * 0.15,
+          vx: (Math.random() - 0.5) * 0.2,
+          vy: Math.random() * 0.15 + 0.05,
+          vz: (Math.random() - 0.5) * 0.2,
           life: 1.0,
-          decay: 0.02 + Math.random() * 0.02
+          decay: 0.015 + Math.random() * 0.02
         });
       }
     }
@@ -596,15 +697,29 @@
       direction = { x: 1, z: 0 };
       nextDirection = { x: 1, z: 0 };
       gameRunning = true;
+      moveInterval = MOVE_INTERVAL_BASE;
+      comboCount = 0;
+      lastEatTime = 0;
+      foodsEaten = 0;
+      level = 1;
+      document.getElementById('level').textContent = '1';
+      document.getElementById('combo-display').classList.remove('active');
+      screenShake = 0;
       createSnake();
       placeFood();
 
       // Clear any leftover particles
       particles.forEach(p => scene.remove(p.mesh));
       particles = [];
+      trailParticles.forEach(t => scene.remove(t.mesh));
+      trailParticles = [];
+
+      // Remove golden food
+      removeGoldenFood();
 
       gameoverScreen.classList.add('hidden');
       lastMoveTime = performance.now();
+      initAudio();
     }
 
     function gameOver() {
@@ -620,7 +735,12 @@
       // Show game over overlay
       finalScoreEl.textContent = String(score);
       finalBestEl.textContent = String(bestScore);
+      document.getElementById('level-reached').textContent = 'Level Reached: ' + level;
       gameoverScreen.classList.remove('hidden');
+
+      // Reset combo display
+      document.getElementById('combo-display').classList.remove('active');
+      comboCount = 0;
     }
 
     // ==================== SNAKE MOVEMENT ====================
@@ -629,45 +749,115 @@
       direction = { ...nextDirection };
 
       const head = snakeSegments[0];
-      const newX = head.x + direction.x;
-      const newZ = head.z + direction.z;
+      let newX = head.x + direction.x;
+      let newZ = head.z + direction.z;
 
-      // Wall collision check
+      // Wall collision / wrap check
       const half = Math.floor(GRID_SIZE / 2);
       if (newX < -half || newX >= half || newZ < -half || newZ >= half) {
-        gameOver();
-        return;
-      }
-
-      // Self collision check
-      for (let i = 0; i < snakeSegments.length; i++) {
-        if (snakeSegments[i].x === newX && snakeSegments[i].z === newZ) {
+        if (wallWrapMode) {
+          if (newX < -half) newX = half - 1;
+          else if (newX >= half) newX = -half;
+          if (newZ < -half) newZ = half - 1;
+          else if (newZ >= half) newZ = -half;
+        } else {
+          screenShake = 0.8;
+          playCrashSound();
           gameOver();
           return;
         }
       }
 
-      // Check if food eaten
-      const ateFood = (newX === foodMesh.userData.x && newZ === foodMesh.userData.z);
+      // Self collision check
+      for (let i = 0; i < snakeSegments.length; i++) {
+        if (snakeSegments[i].x === newX && snakeSegments[i].z === newZ) {
+          screenShake = 0.8;
+          playCrashSound();
+          gameOver();
+          return;
+        }
+      }
 
-      if (ateFood) {
-        score += 10;
+      // Check if regular food eaten
+      const ateFood = (newX === foodMesh.userData.x && newZ === foodMesh.userData.z);
+      // Check if golden food eaten
+      const ateGolden = goldenFoodActive && goldenFoodMesh && (newX === goldenFoodMesh.userData.x && newZ === goldenFoodMesh.userData.z);
+
+      if (ateFood || ateGolden) {
+        const now = performance.now();
+        // Combo logic: if eat within 2 seconds, combo increases
+        if (now - lastEatTime < 2000) {
+          comboCount++;
+        } else {
+          comboCount = 1;
+        }
+        lastEatTime = now;
+
+        // Base points with combo bonus
+        let points = ateGolden ? 50 : 10;
+        points += (comboCount - 1) * 5; // +5 per combo level
+        score += points;
         scoreEl.textContent = String(score);
+
+        // Update combo display
+        const comboEl = document.getElementById('combo-display');
+        const comboCountEl = document.getElementById('combo-count');
+        if (comboCount >= 2) {
+          comboCountEl.textContent = String(comboCount);
+          comboEl.classList.add('active');
+        } else {
+          comboEl.classList.remove('active');
+        }
+
         // Trigger score bump animation
         scoreEl.classList.remove('bump');
-        void scoreEl.offsetWidth; // force reflow
+        void scoreEl.offsetWidth;
         scoreEl.classList.add('bump');
-        spawnParticles(newX, newZ);
-        placeFood();
+
+        // Screen shake on eat
+        screenShake = 0.3;
+
+        // Spawn more particles for combos
+        spawnParticles(newX, newZ, ateGolden ? 15 : 6 + comboCount * 2);
+
+        // Play sound
+        if (ateGolden) {
+          playGoldenSound();
+        } else {
+          playEatSound(comboCount);
+        }
+
+        // Progression: speed up every 5 foods
+        foodsEaten++;
+        if (foodsEaten % 5 === 0) {
+          level++;
+          document.getElementById('level').textContent = String(level);
+          moveInterval = Math.max(60, MOVE_INTERVAL_BASE - (level - 1) * 8);
+          playTone(880, 0.15, 'sine', 0.2);
+        }
+
+        // Spawn trail effect at old head position
+        spawnTrail(head.x, head.z);
+
+        if (ateGolden) {
+          removeGoldenFood();
+        } else {
+          placeFood();
+        }
+
+        // Chance to spawn golden food (10% after eating regular)
+        if (!goldenFoodActive && !ateGolden && Math.random() < 0.1) {
+          spawnGoldenFood();
+        }
       }
 
       // Remove tail if no food eaten (snake moves forward)
-      if (!ateFood) {
+      if (!ateFood && !ateGolden) {
         const tail = snakeSegments.pop();
         scene.remove(tail.mesh);
       }
 
-      // Create new head segment (reuse shared geo/mat)
+      // Create new head segment
       const newHead = new THREE.Mesh(SEG_GEO, MAT_HEAD);
       newHead.position.set(newX * CELL_SIZE, 0, newZ * CELL_SIZE);
       newHead.castShadow = true;
@@ -683,6 +873,81 @@
       }
     }
 
+    // ==================== GOLDEN FOOD ====================
+    function spawnGoldenFood() {
+      if (goldenFoodActive) return;
+      goldenFoodActive = true;
+
+      const geo = new THREE.SphereGeometry(0.5, 32, 32);
+      const mat = new THREE.MeshLambertMaterial({
+        color: 0xFFD700,
+        emissive: 0xFFAA00,
+        emissiveIntensity: 0.8
+      });
+      goldenFoodMesh = new THREE.Mesh(geo, mat);
+      goldenFoodMesh.castShadow = true;
+      scene.add(goldenFoodMesh);
+
+      goldenFoodLight = new THREE.PointLight(0xFFAA00, 2.5, 10);
+      scene.add(goldenFoodLight);
+
+      const half = Math.floor(GRID_SIZE / 2);
+      let x, z, ok;
+      do {
+        x = Math.floor(Math.random() * GRID_SIZE) - half;
+        z = Math.floor(Math.random() * GRID_SIZE) - half;
+        ok = true;
+        for (const seg of snakeSegments) {
+          if (seg.x === x && seg.z === z) { ok = false; break; }
+        }
+        if (foodMesh && foodMesh.userData.x === x && foodMesh.userData.z === z) ok = false;
+      } while (!ok);
+
+      goldenFoodMesh.userData.x = x;
+      goldenFoodMesh.userData.z = z;
+      goldenFoodMesh.position.set(x * CELL_SIZE, 0, z * CELL_SIZE);
+      goldenFoodLight.position.set(x * CELL_SIZE, 1.5, z * CELL_SIZE);
+    }
+
+    function removeGoldenFood() {
+      if (goldenFoodMesh) {
+        scene.remove(goldenFoodMesh);
+        goldenFoodMesh = null;
+      }
+      if (goldenFoodLight) {
+        scene.remove(goldenFoodLight);
+        goldenFoodLight = null;
+      }
+      goldenFoodActive = false;
+    }
+
+    // ==================== TRAIL EFFECTS ====================
+    function spawnTrail(x, z) {
+      const geo = new THREE.BoxGeometry(0.6, 0.05, 0.6);
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x4CAF50,
+        transparent: true,
+        opacity: 0.4
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(x * CELL_SIZE, -0.45, z * CELL_SIZE);
+      scene.add(mesh);
+      trailParticles.push({ mesh, life: 1.0 });
+    }
+
+    function updateTrailParticles() {
+      for (let i = trailParticles.length - 1; i >= 0; i--) {
+        const t = trailParticles[i];
+        t.life -= 0.015;
+        t.mesh.material.opacity = t.life * 0.4;
+        t.mesh.scale.setScalar(0.5 + t.life * 0.5);
+        if (t.life <= 0) {
+          scene.remove(t.mesh);
+          trailParticles.splice(i, 1);
+        }
+      }
+    }
+
     // ==================== CAMERA ====================
     function updateCamera(dt) {
       const head = snakeSegments[0];
@@ -693,9 +958,18 @@
       const targetZ = head.mesh.position.z * 0.3 + 18;
       const targetY = 18;
 
-      camera.position.x += (targetX - camera.position.x) * 1.5 * dt;
-      camera.position.y += (targetY - camera.position.y) * 1.5 * dt;
-      camera.position.z += (targetZ - camera.position.z) * 1.5 * dt;
+      let camX = camera.position.x + (targetX - camera.position.x) * 1.5 * dt;
+      let camY = camera.position.y + (targetY - camera.position.y) * 1.5 * dt;
+      let camZ = camera.position.z + (targetZ - camera.position.z) * 1.5 * dt;
+
+      // Apply screen shake
+      if (screenShake > 0) {
+        camX += (Math.random() - 0.5) * screenShake;
+        camY += (Math.random() - 0.5) * screenShake;
+        camZ += (Math.random() - 0.5) * screenShake;
+      }
+
+      camera.position.set(camX, camY, camZ);
 
       // Look slightly ahead of the head
       camera.lookAt(head.mesh.position.x * 0.2, 0, head.mesh.position.z * 0.2);
@@ -706,9 +980,10 @@
       const dt = Math.min((time - (gameLoop.lastTime || time)) / 1000, 0.1);
       gameLoop.lastTime = time;
       animTime += dt;
+      gameTime += dt;
 
-      // Move snake at fixed interval
-      if (gameRunning && time - lastMoveTime >= MOVE_INTERVAL) {
+      // Move snake at fixed interval (speed increases with level)
+      if (gameRunning && time - lastMoveTime >= moveInterval) {
         moveSnake();
         lastMoveTime = time;
       }
@@ -720,11 +995,26 @@
         foodLight.position.y = 1 + Math.sin(animTime * 3) * 0.15;
       }
 
+      // Golden food animation
+      if (goldenFoodMesh && goldenFoodActive) {
+        goldenFoodMesh.position.y = Math.sin(animTime * 5) * 0.3 + 0.2;
+        goldenFoodMesh.rotation.x += dt * 3;
+        goldenFoodMesh.rotation.y += dt * 4;
+        goldenFoodLight.intensity = 1.5 + Math.sin(animTime * 8) * 0.5;
+      }
+
       // Update particles
       updateParticles();
+      updateTrailParticles();
 
-      // Smooth camera follow
+      // Smooth camera follow with screen shake
       updateCamera(dt);
+
+      // Screen shake decay
+      if (screenShake > 0) {
+        screenShake *= 0.9;
+        if (screenShake < 0.01) screenShake = 0;
+      }
 
       // Render frame
       renderer.render(scene, camera);
